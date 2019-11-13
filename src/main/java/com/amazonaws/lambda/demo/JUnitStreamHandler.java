@@ -22,6 +22,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 
+import javax.tools.Diagnostic;
+import javax.tools.DiagnosticCollector;
 import javax.tools.JavaCompiler;
 import javax.tools.JavaCompiler.CompilationTask;
 import javax.tools.JavaFileObject;
@@ -51,6 +53,7 @@ public class JUnitStreamHandler implements RequestStreamHandler {
 		ResponseClass response = new ResponseClass();
 		Gson gson = new Gson();
 		OutputStreamWriter writer = new OutputStreamWriter(outputStream, "UTF-8");
+		JSONObject responseJsonObject = new JSONObject();
 		try {
 
 			JSONObject event = (JSONObject) parser.parse(reader);
@@ -72,7 +75,6 @@ public class JUnitStreamHandler implements RequestStreamHandler {
 			} else {
 				context.getLogger().log("Body==>" + event.get("body"));
 				if (event.get("body") != null) {
-					// context.getLogger().log("DO I come here==>" + event.get("body").toString());
 					RequestClass requestClass = new RequestClass(event.get("body").toString());
 					String input = requestClass.getMethodCode();
 					String testInput = requestClass.getTestCode();
@@ -92,49 +94,46 @@ public class JUnitStreamHandler implements RequestStreamHandler {
 					context.getLogger().log("Printing Path==>" + classFile.toFile().getAbsolutePath() + "\t"
 							+ Files.exists(classFile) + "\n");
 					returnStr = (String) runClass(classFile, testFileName, context);
-					
-					
-					if(returnStr==null) {
-						responseJson.put("statusCode","200");
+
+					JSONObject headerJson = new JSONObject();
+					headerJson.put("x-custom-header", "my custom header value");
+					responseJson.put("headers", headerJson);
+
+					if (returnStr == null) {
+						responseJson.put("statusCode", "200");
 						response.setComplete(true);
 						response.setTextFeedback("Success");
 						response.setHtmlFeedback("<h1>Success</h1>");
-						response.setJsonFeedback(gson.toJson(response));
-						responseJson.put("body",gson.toJson(response));
-					}else {
-						responseJson.put("statusCode","400");
+						response.setJsonFeedback("{status:Success}");
+						responseJson.put("body", gson.toJson(response));
+					} else {
+						responseJson.put("statusCode", "500");
 						response.setComplete(false);
-						response.setTextFeedback("Failed==>\n\t\t"+returnStr);
+						response.setTextFeedback("Failed==>\n\t\t" + returnStr);
 						response.setHtmlFeedback("<h1>Failed</h1>returnStr");
-						response.setJsonFeedback(gson.toJson(response));						
-						responseJson.put("body",gson.toJson(response));
+						response.setJsonFeedback("{status:Incorrect. Try again!}");
+						responseJson.put("body", gson.toJson(response));
 					}
-					
-					
+
 				}
 			}
 
 		} catch (ParseException pex) {
-			responseJson.put("Status", "Failed");
-			responseJson.put("StatusCode", 400);
-			responseJson.put("Exception", pex);
-			response.setComplete(false);
-			response.setTextFeedback("Failed==>\n\t\t"+pex);
-			response.setHtmlFeedback("<h1>Failed</h1>"+pex);
-			response.setJsonFeedback(gson.toJson(response));						
-			responseJson.put("body",gson.toJson(response));
+			responseJson.put("statusCode", 500);
+			responseJsonObject.put("htmlFeedback", "<h1>Failed</h1><h3>" + pex.getCause() + "</h3>");
+			responseJsonObject.put("textFeedback", "Failed\n" + pex.getCause() + "\n");
+			responseJsonObject.put("jsonFeedback","{status:Incorrect. Try again!}");
+			responseJson.put("body", responseJsonObject.toString());			
 		} catch (Exception e) {
-			context.getLogger().log("Exception occured==>" + e);
-			responseJson.put("Status", "Failed");
-			responseJson.put("Exception", e);
-			response.setComplete(false);
-			response.setTextFeedback("Failed==>\n\t\t"+e);
-			response.setHtmlFeedback("<h1>Failed</h1>"+e);
-			response.setJsonFeedback(gson.toJson(response));						
-			responseJson.put("body",gson.toJson(response));
+			System.out.println("Cause==>" + e.getCause() + "\n" + e.getStackTrace());
+			responseJson.put("statusCode", 500);
+			responseJsonObject.put("htmlFeedback", "<h1>Failed</h1><h3>" + e.getCause() + "</h3>");
+			responseJsonObject.put("textFeedback", "Failed\n" + e.getCause() + "\n");
+			responseJsonObject.put("jsonFeedback","{status:Incorrect. Try again!}");
+			responseJson.put("body", responseJsonObject.toString());
 		}
-		System.out.println("Response object==>"+gson.toJson(response));
-		System.out.println("Returning==>"+responseJson);
+		System.out.println("Response object==>" + gson.toJson(response));
+		System.out.println("Returning==>" + responseJson.toJSONString());
 		writer.write(responseJson.toString());
 		writer.close();
 
@@ -191,7 +190,7 @@ public class JUnitStreamHandler implements RequestStreamHandler {
 
 		strMethod.append("}");
 		return strMethod.toString();
-		
+
 	}
 
 	private Path saveSource(String source, String fileName, Context context) throws IOException {
@@ -200,35 +199,53 @@ public class JUnitStreamHandler implements RequestStreamHandler {
 		return sourcePath;
 	}
 
-	private Path compileSource(Path javaFile, Path testFile, Context context)
+	private Path compileSource(Path javaFile, Path testFile, Context context) throws Exception
 
 	{
 		// Files.readAllBytes
+		String exceptionMsg = "";
 		JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
 		File folder = new File("/var/task/lib");
-		if (compiler == null) {
-			try {
-
-				Class<?> javacTool = Class.forName("com.sun.tools.javac.api.JavacTool");
-				Method create = javacTool.getMethod("create");
-				compiler = (JavaCompiler) create.invoke(null);
-
-			} catch (Exception e) {
-				throw new AssertionError(e);
-			}
-		}
-
+		StringBuilder errorMsg = new StringBuilder();
 		try {
-			StandardJavaFileManager standardJavaFileManager = compiler.getStandardFileManager(null, null, null);
-			standardJavaFileManager.setLocation(StandardLocation.CLASS_PATH, listFilePaths(folder, context));
-			File[] javaFiles = new File[] { javaFile.toFile(), testFile.toFile() };
+				if (compiler == null) {
+	
+					Class<?> javacTool = Class.forName("com.sun.tools.javac.api.JavacTool");
+					Method create = javacTool.getMethod("create");
+					compiler = (JavaCompiler) create.invoke(null);
+				}
+	
+				DiagnosticCollector<JavaFileObject> diagnosticsCollector = new DiagnosticCollector<JavaFileObject>();
+				StandardJavaFileManager standardJavaFileManager = compiler.getStandardFileManager(diagnosticsCollector,
+						null, null);
+				standardJavaFileManager.setLocation(StandardLocation.CLASS_PATH, listFilePaths(folder, context));
+	
+				File[] javaFiles = new File[] { javaFile.toFile(), testFile.toFile() };
+	
+				Iterable<? extends JavaFileObject> compilationUnits1 = standardJavaFileManager
+						.getJavaFileObjectsFromFiles(Arrays.asList(javaFiles));
+				CompilationTask task = compiler.getTask(null, standardJavaFileManager, diagnosticsCollector, null, null,
+						compilationUnits1);
+				boolean success = task.call();
+				standardJavaFileManager.close();
+				if (!success) {
+					List<Diagnostic<? extends JavaFileObject>> diagnostics = diagnosticsCollector.getDiagnostics();
+					for (Diagnostic<? extends JavaFileObject> diagnostic : diagnostics) {
+						// read error details from the diagnostic object
+	
+						if (diagnostic.getKind() == Diagnostic.Kind.ERROR) {
+							exceptionMsg = String.format("Compilation error: Line %d - %s%n", diagnostic.getLineNumber(),
+									diagnostic.getMessage(null));
+	
+							errorMsg.append(exceptionMsg);
+						}
+					}
+					throw new Exception(errorMsg.toString());
+				}
 
-			Iterable<? extends JavaFileObject> compilationUnits1 = standardJavaFileManager
-					.getJavaFileObjectsFromFiles(Arrays.asList(javaFiles));
-			CompilationTask task = compiler.getTask(null, standardJavaFileManager, null, null, null, compilationUnits1);
-			task.call();
 		} catch (Exception e) {
-			context.getLogger().log("Exception " + e + "\n");
+			context.getLogger().log("compilation Exception " + e + "\n");
+			throw new Exception(e);
 		}
 		return javaFile.getParent().resolve("JUnitTest.class");
 	}
@@ -256,13 +273,11 @@ public class JUnitStreamHandler implements RequestStreamHandler {
 		}
 		try {
 			Method m = obj.getClass().getDeclaredMethod("executeTest");
-			return m.invoke(obj);			
+			return m.invoke(obj);
 		} catch (InvocationTargetException e) {
-			System.out.println("Do I come here for the InvocationTargetException");
-			System.out.println(e.getTargetException());
-			throw e;
+			throw new InvocationTargetException(e);
 		}
-		
+
 	}
 
 }
